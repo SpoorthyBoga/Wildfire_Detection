@@ -1,0 +1,80 @@
+# ================================
+# Python bytecode / cache
+# ================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+
+# ================================
+# Virtual environments
+# ================================
+venv/
+.venv/
+env/
+ENV/
+
+# ================================
+# OS-specific files
+# ================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ================================
+# IDE / Editor settings
+# ================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ================================
+# Jupyter / IPython
+# ================================
+.ipynb_checkpoints/
+
+# ================================
+# Logs & temporary files
+# ================================
+*.log
+*.tmp
+
+# ================================
+# Generated datasets (large, reproducible)
+# ================================
+landsat8_train_dataset/
+
+# ================================
+# Trained models / artifacts
+# ================================
+fire_cnn_heavy.pth
+onboard_model.npy
+
+# ================================
+# Python build / distribution
+# ================================
+build/
+dist/
+*.egg-info/
+
+# ================================
+# Downloaded satellite products
+# ================================
+*.hdf
+*.h5
+*.nc
+*.tif
+*.tiff
+
+# ================================
+# Environment & secrets
+# ================================
+.env
+.env.*
+
+# ================================
+# System-specific junk
+# ================================
+*.stackdump

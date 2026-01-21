@@ -45,6 +45,7 @@ desktop.ini
 # Generated datasets (large, reproducible)
 # ================================
 landsat8_train_dataset/
+landsat8_dataset/
 
 # ================================
 # Trained models / artifacts

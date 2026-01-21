@@ -1,143 +1,81 @@
-import os
-import csv
-import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+import csv
 from sklearn.linear_model import LinearRegression
 
-# -------------------------------------------------
-# CONFIG
-# -------------------------------------------------
-DATASET_DIR = "landsat8_train_dataset"
-B7_DIR = os.path.join(DATASET_DIR, "band7_swir")
-B10_DIR = os.path.join(DATASET_DIR, "band10_thermal")
-LABEL_FILE = os.path.join(DATASET_DIR, "labels.csv")
+# --- CONFIG ---
+DEVICE = "cpu" # Safe for all machines
+DATA_DIR = "landsat8_dataset"
 
-MODEL_PATH = "fire_cnn_heavy.pth"
-OUT_FILE = "onboard_model.npy"
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MAX_DN = 65535.0
-
-print("Using device:", DEVICE)
-
-# -------------------------------------------------
-# TEACHER MODEL (MUST MATCH TRAINING EXACTLY)
-# -------------------------------------------------
+# --- 1. DEFINE TEACHER MODEL (Heavy CNN) ---
 class FireCNN(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(2, 16, 3, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(16, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),
-
+            nn.Conv2d(2, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
             nn.Flatten(),
-            nn.Linear(64, 1),
-            nn.Sigmoid()
+            nn.Linear(32 * 8 * 8, 1), nn.Sigmoid()
         )
+    def forward(self, x): return self.net(x)
 
-    def forward(self, x):
-        return self.net(x)
+# --- 2. DATA LOADER ---
+class FireDataset(Dataset):
+    def __init__(self):
+        with open(f"{DATA_DIR}/labels.csv") as f:
+            self.rows = list(csv.DictReader(f))
+    def __getitem__(self, i):
+        sid = self.rows[i]["sample_id"]
+        b7 = np.load(f"{DATA_DIR}/band7_swir/{sid}.npy")
+        b10 = np.load(f"{DATA_DIR}/band10_thermal/{sid}.npy")
+        x = np.stack([b7, b10])
+        y = float(self.rows[i]["fire_label"])
+        return torch.tensor(x, dtype=torch.float32), torch.tensor([y]), b7, b10
+    def __len__(self): return len(self.rows)
 
-# -------------------------------------------------
-# LOAD TRAINED TEACHER
-# -------------------------------------------------
-print("Loading trained teacher CNN...")
-
+# --- 3. TRAINING LOOP ---
+print(">>> Training Teacher Model (CNN)...")
+dataset = FireDataset()
+loader = DataLoader(dataset, batch_size=32, shuffle=True)
 teacher = FireCNN().to(DEVICE)
-teacher.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+opt = optim.Adam(teacher.parameters(), lr=1e-3)
+loss_fn = nn.BCELoss()
+
+for epoch in range(5):
+    total_loss = 0
+    for x, y, _, _ in loader:
+        x, y = x.to(DEVICE), y.to(DEVICE)
+        pred = teacher(x)
+        loss = loss_fn(pred, y)
+        opt.zero_grad(); loss.backward(); opt.step()
+        total_loss += loss.item()
+    print(f"    Epoch {epoch+1}: Loss {total_loss/len(loader):.4f}")
+
+# --- 4. DISTILLATION (Teacher -> Student) ---
+print("\n>>> Distilling to Student Model (Linear)...")
 teacher.eval()
+X_student, y_teacher = [], []
 
-print("Teacher model loaded successfully.")
-
-# -------------------------------------------------
-# FEATURE EXTRACTION (ONBOARD-COMPATIBLE)
-# -------------------------------------------------
-def extract_features(b7_dn, b10_dn):
-    """
-    Physics-aware, lightweight features
-    """
-    b7 = b7_dn / MAX_DN
-    b10 = b10_dn / MAX_DN
-
-    return np.array([
-        b10.mean(),                 # overall thermal level
-        b10.max(),                  # hotspot detection
-        b10.std(),                  # thermal variability
-        b7.max(),                   # SWIR fire response
-        (b7 / (b10 + 1e-6)).max()   # SWIR–thermal contrast
-    ])
-
-# -------------------------------------------------
-# LOAD DATASET
-# -------------------------------------------------
-with open(LABEL_FILE) as f:
-    rows = list(csv.DictReader(f))
-
-print("Total samples for distillation:", len(rows))
-
-X = []
-y_soft = []
-
-# -------------------------------------------------
-# DISTILL KNOWLEDGE
-# -------------------------------------------------
-print("Extracting teacher knowledge...")
+def extract_features(b7, b10):
+    # Lightweight features for the onboard CPU
+    return [b10.mean(), b10.max(), b10.std(), b7.max(), (b7/(b10+1e-6)).max()]
 
 with torch.no_grad():
-    for i, r in enumerate(rows):
-        sid = r["sample_id"]
+    for x, _, b7_batch, b10_batch in loader:
+        teacher_preds = teacher(x.to(DEVICE)).cpu().numpy().flatten()
+        
+        for i in range(len(teacher_preds)):
+            feats = extract_features(b7_batch[i].numpy(), b10_batch[i].numpy())
+            X_student.append(feats)
+            y_teacher.append(teacher_preds[i])
 
-        b7 = np.load(os.path.join(B7_DIR, f"{sid}.npy"))
-        b10 = np.load(os.path.join(B10_DIR, f"{sid}.npy"))
+# Fit Linear Regression to mimic the Teacher
+student = LinearRegression().fit(X_student, y_teacher)
+weights = {"W": student.coef_, "B": student.intercept_}
+np.save("student_model.npy", weights)
 
-        # Student features
-        feats = extract_features(b7, b10)
-        X.append(feats)
-
-        # Teacher prediction
-        x = np.stack([b7 / MAX_DN, b10 / MAX_DN], axis=0)
-        x = torch.tensor(x, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-
-        prob = teacher(x).item()
-        y_soft.append(prob)
-
-        if (i + 1) % 500 == 0:
-            print(f"Processed {i + 1} samples")
-
-X = np.array(X)
-y_soft = np.array(y_soft)
-
-# -------------------------------------------------
-# TRAIN STUDENT MODEL (REGRESSION ON SOFT LABELS)
-# -------------------------------------------------
-print("\nTraining lightweight onboard student model...")
-
-student = LinearRegression()
-student.fit(X, y_soft)
-
-W = student.coef_
-B = student.intercept_
-
-print("Distillation complete.")
-print("Onboard weights:", W)
-print("Onboard bias:", B)
-
-# -------------------------------------------------
-# SAVE ONBOARD MODEL
-# -------------------------------------------------
-np.save(OUT_FILE, {"W": W, "B": B})
-
-print("\nOnboard model saved as:", OUT_FILE)
-print("READY FOR SATELLITE DEPLOYMENT")
+print(f"✔ Distillation Complete. Student weights saved.")
+print(f"    Weights: {student.coef_}")

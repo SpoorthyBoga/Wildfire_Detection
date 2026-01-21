@@ -1,71 +1,82 @@
 import numpy as np
 import csv
 import os
+import shutil
 
-OUT_DIR = "landsat8_train_dataset"
-os.makedirs(f"{OUT_DIR}/band7_swir", exist_ok=True)
-os.makedirs(f"{OUT_DIR}/band10_thermal", exist_ok=True)
-
-PATCH = 32
+# --- CONFIGURATION ---
+K1_CONST = 774.8853
+K2_CONST = 1321.0789
+PATCH_SIZE = 32
 NUM_SAMPLES = 3000
+OUT_DIR = "landsat8_dataset"
 
+def setup_directories():
+    if os.path.exists(OUT_DIR):
+        shutil.rmtree(OUT_DIR)
+    os.makedirs(f"{OUT_DIR}/band7_swir")
+    os.makedirs(f"{OUT_DIR}/band10_thermal")
+    print(f"✔ Directories created at ./{OUT_DIR}")
+
+def temp_to_radiance(T):
+    return K1_CONST / (np.exp(K2_CONST / T) - 1)
+
+def generate_scene(scene_type):
+    # Base Background (Land Surface Temp ~285K)
+    T = np.random.normal(285, 5, (PATCH_SIZE, PATCH_SIZE))
+    b10 = temp_to_radiance(T)
+    b7 = np.random.normal(0.15, 0.03, (PATCH_SIZE, PATCH_SIZE)) # SWIR Reflectance
+
+    if scene_type == "background":
+        return b7, b10, 0
+
+    # Inject Fire
+    r, c = np.random.randint(8, 24), np.random.randint(8, 24)
+    intensity = "early" if scene_type == "early_fire" else "active"
+    
+    radius = 2 if intensity == "early" else 5
+    temp_base = 310 if intensity == "early" else 340
+    
+    for i in range(-radius, radius+1):
+        for j in range(-radius, radius+1):
+            dist = np.sqrt(i*i + j*j)
+            if dist > radius: continue
+            
+            heat_decay = np.exp(-dist / 2)
+            T_pixel = temp_base + (np.random.uniform(0, 20) if intensity=="early" else heat_decay * 120)
+            
+            # Update bands
+            b10[r+i, c+j] = temp_to_radiance(T_pixel)
+            b7[r+i, c+j] += np.random.uniform(0.15, 0.25) if intensity=="early" else (heat_decay * 0.4)
+
+    return b7, b10, 1
+
+# --- MAIN EXECUTION ---
+setup_directories()
 rows = []
 
-def generate_background():
-    b7 = np.random.normal(8000, 1500, (PATCH, PATCH))
-    b10 = np.random.normal(12000, 2000, (PATCH, PATCH))
-    return b7, b10
-
-def generate_early_fire():
-    b7, b10 = generate_background()
-    r, c = np.random.randint(8, 24), np.random.randint(8, 24)
-
-    for i in range(-2, 3):
-        for j in range(-2, 3):
-            b10[r+i, c+j] += np.random.uniform(8000, 12000)
-            b7[r+i, c+j] += np.random.uniform(4000, 6000)
-
-    return b7, b10
-
-def generate_active_fire():
-    b7, b10 = generate_background()
-    r, c = np.random.randint(10, 22), np.random.randint(10, 22)
-
-    for i in range(-5, 6):
-        for j in range(-5, 6):
-            dist = np.sqrt(i*i + j*j)
-            heat = np.exp(-dist / 3)
-            b10[r+i, c+j] += heat * np.random.uniform(15000, 25000)
-            b7[r+i, c+j] += heat * np.random.uniform(8000, 12000)
-
-    return b7, b10
-
-sample_id = 0
-
-for _ in range(NUM_SAMPLES):
-    if _ < NUM_SAMPLES * 0.4:
-        b7, b10 = generate_background()
-        label = 0
-    elif _ < NUM_SAMPLES * 0.7:
-        b7, b10 = generate_early_fire()
-        label = 1
+print("Generating synthetic Landsat 8 data...")
+for i in range(NUM_SAMPLES):
+    if i < NUM_SAMPLES * 0.4:
+        sType = "background"
+    elif i < NUM_SAMPLES * 0.7:
+        sType = "early_fire"
     else:
-        b7, b10 = generate_active_fire()
-        label = 1
+        sType = "active_fire"
 
-    b7 = np.clip(b7, 0, 65535)
-    b10 = np.clip(b10, 0, 65535)
+    b7, b10, label = generate_scene(sType)
 
-    sid = f"L8_{sample_id:05d}"
-    np.save(f"{OUT_DIR}/band7_swir/{sid}.npy", b7)
-    np.save(f"{OUT_DIR}/band10_thermal/{sid}.npy", b10)
+    # Normalize/Clip to realistic sensor bounds
+    b7 = np.clip(b7, 0, 1)
+    b10 = np.clip(b10, 0, None)
 
-    rows.append({"sample_id": sid, "fire_label": label})
-    sample_id += 1
+    name = f"L8_{i:05d}"
+    np.save(f"{OUT_DIR}/band7_swir/{name}.npy", b7)
+    np.save(f"{OUT_DIR}/band10_thermal/{name}.npy", b10)
+    rows.append({"sample_id": name, "fire_label": label})
 
 with open(f"{OUT_DIR}/labels.csv", "w", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=["sample_id", "fire_label"])
     writer.writeheader()
     writer.writerows(rows)
 
-print("Spectrally realistic dataset generated.")
+print(f"✔ Dataset Complete: {NUM_SAMPLES} scenes generated.")

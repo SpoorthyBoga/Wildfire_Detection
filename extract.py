@@ -1,32 +1,26 @@
-import os
-import csv
-import numpy as np
+import os, csv, numpy as np
+from math import log
 
-DATASET_DIR = "landsat8_train_dataset"
-B10_DIR = os.path.join(DATASET_DIR, "band10_thermal")
-LABEL_FILE = os.path.join(DATASET_DIR, "labels.csv")
+K1 = 774.8853
+K2 = 1321.0789
 
-temps_bg = []
-temps_fire = []
+def radiance_to_temp(L):
+    return K2 / np.log((K1 / L) + 1)
 
-with open(LABEL_FILE) as f:
-    reader = csv.DictReader(f)
-    for row in reader:
-        sid = row["sample_id"]
-        b10 = np.load(os.path.join(B10_DIR, f"{sid}.npy"))
+DATASET = "landsat8_train_dataset/band10_thermal"
 
-        temp_max = (b10 / 65535.0 * 330.0).max()
+bg, fire = [], []
 
-        if row["fire_label"] == "0":
-            temps_bg.append(temp_max)
+with open("landsat8_train_dataset/labels.csv") as f:
+    for r in csv.DictReader(f):
+        b10 = np.load(f"{DATASET}/{r['sample_id']}.npy")
+        T = radiance_to_temp(b10.max())
+
+        if r["fire_label"] == "0":
+            bg.append(T)
         else:
-            temps_fire.append(temp_max)
+            fire.append(T)
 
-print("\n=== THERMAL STATISTICS (K) ===")
-print("Background max temp:")
-print("  mean :", round(np.mean(temps_bg), 2))
-print("  max  :", round(np.max(temps_bg), 2))
-
-print("\nFire max temp:")
-print("  mean :", round(np.mean(temps_fire), 2))
-print("  max  :", round(np.max(temps_fire), 2))
+print("\nTHERMAL CALIBRATION (K)")
+print("Background max:", round(np.mean(bg),2), "/", round(np.max(bg),2))
+print("Fire max      :", round(np.mean(fire),2), "/", round(np.max(fire),2))
